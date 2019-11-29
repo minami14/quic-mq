@@ -10,7 +10,7 @@ type streamManager struct {
 	*sync.RWMutex
 	broker  *MessageBroker
 	lockers map[string]*sync.RWMutex
-	streams map[string]map[quic.StreamID]quic.Stream
+	streams map[string]map[quic.StreamID]quic.SendStream
 }
 
 func newStreamManager(broker *MessageBroker) *streamManager {
@@ -18,17 +18,17 @@ func newStreamManager(broker *MessageBroker) *streamManager {
 		RWMutex: new(sync.RWMutex),
 		broker:  broker,
 		lockers: map[string]*sync.RWMutex{},
-		streams: map[string]map[quic.StreamID]quic.Stream{},
+		streams: map[string]map[quic.StreamID]quic.SendStream{},
 	}
 }
 
-func (m *streamManager) store(streamName string, stream quic.Stream) {
+func (m *streamManager) store(streamName string, stream quic.SendStream) {
 	m.RLock()
 	locker, ok := m.lockers[streamName]
 	if !ok {
 		locker = new(sync.RWMutex)
 		m.lockers[streamName] = locker
-		m.streams[streamName] = map[quic.StreamID]quic.Stream{}
+		m.streams[streamName] = map[quic.StreamID]quic.SendStream{}
 	}
 
 	m.RUnlock()

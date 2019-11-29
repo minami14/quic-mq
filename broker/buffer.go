@@ -1,6 +1,7 @@
 package broker
 
 import (
+	"sort"
 	"sync"
 	"time"
 
@@ -57,6 +58,81 @@ func (m *bufferedMessageManager) store(streamName string, buf []byte, duration t
 	messages[string(messageID[:])] = message
 	locker.Unlock()
 	return messageID[:]
+}
+
+func (m *bufferedMessageManager) loadByTime(streamName string, duration time.Duration) (buffers [][]byte) {
+	locker, ok := m.lockers[streamName]
+	if !ok {
+		return
+	}
+
+	messages, ok := m.messages[streamName]
+	if !ok {
+		return
+	}
+
+	locker.RLock()
+	for _, message := range messages {
+		if time.Now().Sub(message.create) < duration {
+			buffers = append(buffers, message.buf)
+		}
+	}
+
+	locker.RUnlock()
+	return
+}
+
+func (m *bufferedMessageManager) loadByCount(streamName string, count int) (buffers [][]byte) {
+	locker, ok := m.lockers[streamName]
+	if !ok {
+		return
+	}
+
+	messages, ok := m.messages[streamName]
+	if !ok {
+		return
+	}
+
+	locker.RLock()
+	var tmpMessages []*bufferedMessage
+	for _, message := range messages {
+		tmpMessages = append(tmpMessages, message)
+	}
+
+	locker.RUnlock()
+	sort.Slice(tmpMessages, func(i, j int) bool {
+		return tmpMessages[i].create.After(tmpMessages[j].create)
+	})
+
+	for i, message := range tmpMessages {
+		if i >= count {
+			break
+		}
+
+		buffers = append(buffers, message.buf)
+	}
+
+	return
+}
+
+func (m *bufferedMessageManager) load(streamName string) (buffers [][]byte) {
+	locker, ok := m.lockers[streamName]
+	if !ok {
+		return
+	}
+
+	messages, ok := m.messages[streamName]
+	if !ok {
+		return
+	}
+
+	locker.RLock()
+	for _, message := range messages {
+		buffers = append(buffers, message.buf)
+	}
+
+	locker.RUnlock()
+	return
 }
 
 func (m *bufferedMessageManager) delete(streamName string, messageID []byte) {

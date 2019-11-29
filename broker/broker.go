@@ -9,18 +9,22 @@ import (
 	"github.com/lucas-clemente/quic-go"
 )
 
+// MessageBroker delivers messages to clients.
 type MessageBroker struct {
 	maxMessageSize int
 	maxStreamCount int
+	userManger     *userManger
 	streamManager  *streamManager
 	bufferManager  *bufferedMessageManager
 	logger         *log.Logger
 }
 
+// New creates an instance of MessageBroker.
 func New() *MessageBroker {
 	b := &MessageBroker{
 		maxMessageSize: math.MaxInt16,
 		maxStreamCount: math.MaxInt8,
+		userManger:     newUserManger(),
 		logger:         new(log.Logger),
 	}
 
@@ -30,6 +34,14 @@ func New() *MessageBroker {
 	return b
 }
 
+// SetConfig sets config.
+func (b *MessageBroker) SetConfig(config Config) {
+	for _, user := range config.Users {
+		b.userManger.register(user.UserID, user.Password)
+	}
+}
+
+// Start starts a MessageBroker.
 func (b *MessageBroker) Start(ctx context.Context, addr string, tlsConf *tls.Config) error {
 	listener, err := quic.ListenAddr(addr, tlsConf, nil)
 	if err != nil {
@@ -43,10 +55,7 @@ func (b *MessageBroker) Start(ctx context.Context, addr string, tlsConf *tls.Con
 		}
 
 		go func() {
-			c := &client{
-				broker: b,
-			}
-
+			c := newClient(b)
 			if err := c.run(ctx, session); err != nil {
 				b.logger.Println(err)
 			}
@@ -58,6 +67,6 @@ func (b *MessageBroker) publish(streamName string, buf []byte) int {
 	return b.streamManager.publish(streamName, buf)
 }
 
-func (b *MessageBroker) subscribe(streamName string, stream quic.Stream) {
+func (b *MessageBroker) subscribe(streamName string, requestBuffer byte, stream quic.SendStream) {
 	b.streamManager.store(streamName, stream)
 }
