@@ -1,0 +1,20 @@
+language: go
+
+env:
+  GO111MODULE=on
+
+go:
+  - 1.13.x
+
+services:
+  - redis-server
+
+install:
+  - go get golang.org/x/tools/cmd/goimports
+  - go get -u golang.org/x/lint/golint
+  - go get -v -t -d ./...
+
+script:
+  - diff <(goimports -d $(find . -type f -name '*.go' -not -path "./vendor/*" -not -path "./lib/*")) <(printf "")
+  - golint -set_exit_status ./...
+  - go test -v -bench . -benchmem
