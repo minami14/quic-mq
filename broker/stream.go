@@ -1,6 +1,7 @@
 package broker
 
 import (
+	"encoding/binary"
 	"sync"
 
 	"github.com/lucas-clemente/quic-go"
@@ -59,12 +60,15 @@ func (m *streamManager) delete(streamName string, streamID quic.StreamID) {
 	locker.Unlock()
 }
 
-func (m *streamManager) publish(streamName string, buf []byte) int {
+func (m *streamManager) publish(streamName string, message []byte) int {
 	locker, ok := m.lockers[streamName]
 	if !ok {
 		return 0
 	}
 
+	buf := make([]byte, len(message)+2)
+	binary.LittleEndian.PutUint16(buf, uint16(len(message)))
+	copy(buf[2:], message)
 	locker.RLock()
 	count := 0
 	var deadStreams []quic.StreamID

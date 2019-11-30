@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"log"
 	"math"
+	"os"
 
 	"github.com/lucas-clemente/quic-go"
 )
@@ -25,7 +26,7 @@ func New() *MessageBroker {
 		maxMessageSize: math.MaxInt16,
 		maxStreamCount: math.MaxInt8,
 		userManger:     newUserManger(),
-		logger:         new(log.Logger),
+		logger:         log.New(os.Stdout, "broker ", log.LstdFlags),
 	}
 
 	b.streamManager = newStreamManager(b)
@@ -35,7 +36,7 @@ func New() *MessageBroker {
 }
 
 // SetConfig sets config.
-func (b *MessageBroker) SetConfig(config Config) {
+func (b *MessageBroker) SetConfig(config *Config) {
 	for _, user := range config.Users {
 		b.userManger.register(user.UserID, user.Password)
 	}

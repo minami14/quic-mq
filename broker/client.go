@@ -30,6 +30,15 @@ func (c *client) run(ctx context.Context, session quic.Session) error {
 
 	buf := make([]byte, c.broker.maxMessageSize)
 	if err := c.verify(buf, stream); err != nil {
+		binary.LittleEndian.PutUint16(buf, 1)
+		buf[2] = authErr
+		_, _ = stream.Write(buf[:3])
+		return err
+	}
+
+	binary.LittleEndian.PutUint16(buf, 1)
+	buf[2] = statusOK
+	if _, err := stream.Write(buf[:3]); err != nil {
 		return err
 	}
 
@@ -66,6 +75,8 @@ const (
 
 const (
 	statusOK = iota + 1
+	authErr
+	invalidMessage
 )
 
 const (
@@ -109,28 +120,15 @@ func (c *client) startStream(ctx context.Context, buf []byte, stream quic.Stream
 			return err
 		}
 
-		responseByte := 0
 		switch messageType {
 		case publishMessage:
 			n = c.broker.publish(streamName, buf[:n])
-			binary.LittleEndian.PutUint16(buf, uint16(3))
-			buf[2] = statusOK
-			binary.LittleEndian.PutUint16(buf[3:], uint16(n))
-			responseByte = 5
 		case publishBufferedMessage:
 			lifetime := time.Duration(binary.LittleEndian.Uint32(buf))
-			streamID := c.broker.bufferManager.store(streamName, buf[4:], lifetime)
+			c.broker.bufferManager.store(streamName, buf[4:n], lifetime)
 			n = c.broker.publish(streamName, buf[4:n])
-			binary.LittleEndian.PutUint16(buf, uint16(19))
-			buf[2] = statusOK
-			binary.LittleEndian.PutUint16(buf[3:], uint16(n))
-			copy(buf[5:21], streamID)
-			responseByte = 21
 		case deleteBufferedMessage:
 			c.broker.bufferManager.delete(streamName, buf[:16])
-			binary.LittleEndian.PutUint16(buf, uint16(1))
-			buf[2] = statusOK
-			responseByte = 3
 		case subscribe:
 			s, err := c.subscribe(ctx, streamName, buf[:n], session)
 			if err != nil {
@@ -138,17 +136,16 @@ func (c *client) startStream(ctx context.Context, buf []byte, stream quic.Stream
 			}
 			streams[s] = streamName
 		case endStream:
-			for stream, streamName := range streams {
-				c.broker.streamManager.delete(streamName, stream.StreamID())
-				_, _ = stream.Write([]byte{0, 0})
-				_ = stream.Close()
+			for stream, topic := range streams {
+				if topic == streamName {
+					c.broker.streamManager.delete(streamName, stream.StreamID())
+					_, _ = stream.Write([]byte{0, 0})
+					_ = stream.Close()
+					break
+				}
 			}
 		default:
 			return fmt.Errorf("invalid message %v", buf)
-		}
-
-		if _, err := stream.Write(buf[:responseByte]); err != nil {
-			return err
 		}
 	}
 }
@@ -163,10 +160,10 @@ func (c *client) subscribe(ctx context.Context, streamName string, requestBuffer
 		return nil, err
 	}
 
-	buf := make([]byte, 3, 3+len(streamName))
+	buf := make([]byte, 3+len(streamName))
 	binary.LittleEndian.PutUint16(buf, uint16(len(streamName)+1))
-	buf[0] = sub
-	buf = append(buf[1:], streamName...)
+	buf[2] = sub
+	copy(buf[3:], streamName)
 	if _, err := stream.Write(buf); err != nil {
 		return nil, err
 	}
@@ -177,7 +174,7 @@ func (c *client) subscribe(ctx context.Context, streamName string, requestBuffer
 		c.broker.streamManager.store(streamName, stream)
 		return stream, nil
 	case requestBufferTime:
-		duration := time.Duration(binary.LittleEndian.Uint32(requestBuffer[1:]))
+		duration := time.Duration(binary.LittleEndian.Uint32(requestBuffer[1:])) * time.Second
 		buffers = c.broker.bufferManager.loadByTime(streamName, duration)
 	case requestBufferCount:
 		count := int(binary.LittleEndian.Uint16(requestBuffer[1:]))
