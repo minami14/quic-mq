@@ -5,6 +5,7 @@ import (
 	"github.com/lucas-clemente/quic-go"
 )
 
+// SubConn is a subscription stream.
 type SubConn struct {
 	receive chan []byte
 	topic   string
@@ -44,18 +45,22 @@ func (c *SubConn) start(ctx context.Context) error {
 	}
 }
 
+// Topic is a subscribed topic.
 func (c *SubConn) Topic() string {
 	return c.topic
 }
 
+// Receive returns received message.
 func (c *SubConn) Receive() <-chan []byte {
 	return c.receive
 }
 
+// Done channel for cancellation.
 func (c *SubConn) Done() <-chan struct{} {
 	return c.ctx.Done()
 }
 
+// Close closes the stream.
 func (c *SubConn) Close() error {
 	return c.conn.CancelSubscribe(c.topic)
 }

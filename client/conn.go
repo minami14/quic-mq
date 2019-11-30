@@ -13,6 +13,7 @@ import (
 	"time"
 )
 
+// Conn represents a connection to a message broker.
 type Conn struct {
 	config  *Config
 	stream  quic.Stream
@@ -47,6 +48,7 @@ const (
 	sub
 )
 
+// Dial connects to the message broker.
 func Dial(ctx context.Context, address string, tlsConf *tls.Config, config *Config) (*Conn, error) {
 	conn := &Conn{
 		config: config,
@@ -96,6 +98,7 @@ func Dial(ctx context.Context, address string, tlsConf *tls.Config, config *Conf
 	return conn, err
 }
 
+// Publish publishes a message.
 func (c *Conn) Publish(topic string, data []byte, buffer bool, duration time.Duration) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -128,6 +131,7 @@ func (c *Conn) Publish(topic string, data []byte, buffer bool, duration time.Dur
 	return nil
 }
 
+// Subscribe subscribes to a topic.
 func (c *Conn) Subscribe(ctx context.Context, topic string) (*SubConn, error) {
 	c.subMu.Lock()
 	defer c.subMu.Unlock()
@@ -173,6 +177,7 @@ func (c *Conn) Subscribe(ctx context.Context, topic string) (*SubConn, error) {
 	return subConn, nil
 }
 
+// SubscribeRequestBufferByDuration subscribes to a topic and requests buffers before specified duration.
 func (c *Conn) SubscribeRequestBufferByDuration(ctx context.Context, topic string, duration time.Duration) (*SubConn, error) {
 	c.subMu.Lock()
 	defer c.subMu.Unlock()
@@ -220,6 +225,7 @@ func (c *Conn) SubscribeRequestBufferByDuration(ctx context.Context, topic strin
 	return subConn, nil
 }
 
+// SubscribeRequestBufferByCount subscribes to a topic and requests the specified count of buffers.
 func (c *Conn) SubscribeRequestBufferByCount(ctx context.Context, topic string, count int) (*SubConn, error) {
 	c.subMu.Lock()
 	defer c.subMu.Unlock()
@@ -267,6 +273,7 @@ func (c *Conn) SubscribeRequestBufferByCount(ctx context.Context, topic string, 
 	return subConn, nil
 }
 
+// CancelSubscribe cancels subscription.
 func (c *Conn) CancelSubscribe(topic string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -285,6 +292,7 @@ func (c *Conn) CancelSubscribe(topic string) error {
 	return nil
 }
 
+// SetLogger is setter for logger.
 func (c *Conn) SetLogger(logger *log.Logger) {
 	c.logger = logger
 }
