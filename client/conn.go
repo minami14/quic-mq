@@ -107,7 +107,7 @@ func (c *Conn) Publish(topic string, data []byte, buffer bool, duration time.Dur
 	n := 2
 	if buffer {
 		c.buf[n] = publishBufferedMessage
-		n += 1
+		n++
 		copy(c.buf[n:], topic)
 		n += len(topic)
 		binary.LittleEndian.PutUint16(c.buf[n:], uint16(len(data)+4))
@@ -116,7 +116,7 @@ func (c *Conn) Publish(topic string, data []byte, buffer bool, duration time.Dur
 		n += 4
 	} else {
 		c.buf[n] = publishMessage
-		n += 1
+		n++
 		copy(c.buf[n:], topic)
 		n += len(topic)
 		binary.LittleEndian.PutUint16(c.buf[n:], uint16(len(data)))
@@ -140,13 +140,13 @@ func (c *Conn) Subscribe(ctx context.Context, topic string) (*SubConn, error) {
 	binary.LittleEndian.PutUint16(c.buf, uint16(len(topic)+1))
 	n := 2
 	c.buf[n] = subscribe
-	n += 1
+	n++
 	copy(c.buf[n:], topic)
 	n += len(topic)
 	binary.LittleEndian.PutUint16(c.buf[n:], 1)
 	n += 2
 	c.buf[n] = notRequestBuffer
-	n += 1
+	n++
 	if _, err := c.stream.Write(c.buf[:n]); err != nil {
 		c.mu.Unlock()
 		return nil, err
@@ -186,13 +186,13 @@ func (c *Conn) SubscribeRequestAllBuffer(ctx context.Context, topic string) (*Su
 	binary.LittleEndian.PutUint16(c.buf, uint16(len(topic)+1))
 	n := 2
 	c.buf[n] = subscribe
-	n += 1
+	n++
 	copy(c.buf[n:], topic)
 	n += len(topic)
 	binary.LittleEndian.PutUint16(c.buf[n:], 1)
 	n += 2
 	c.buf[n] = requestBufferAll
-	n += 1
+	n++
 	if _, err := c.stream.Write(c.buf[:n]); err != nil {
 		c.mu.Unlock()
 		return nil, err
@@ -232,13 +232,13 @@ func (c *Conn) SubscribeRequestBufferByDuration(ctx context.Context, topic strin
 	binary.LittleEndian.PutUint16(c.buf, uint16(len(topic)+1))
 	n := 2
 	c.buf[n] = subscribe
-	n += 1
+	n++
 	copy(c.buf[n:], topic)
 	n += len(topic)
 	binary.LittleEndian.PutUint16(c.buf[n:], 5)
 	n += 2
 	c.buf[n] = requestBufferTime
-	n += 1
+	n++
 	binary.LittleEndian.PutUint32(c.buf[n:], uint32(duration))
 	n += 4
 	if _, err := c.stream.Write(c.buf[:n]); err != nil {
@@ -280,13 +280,13 @@ func (c *Conn) SubscribeRequestBufferByCount(ctx context.Context, topic string, 
 	binary.LittleEndian.PutUint16(c.buf, uint16(len(topic)+1))
 	n := 2
 	c.buf[n] = subscribe
-	n += 1
+	n++
 	copy(c.buf[n:], topic)
 	n += len(topic)
 	binary.LittleEndian.PutUint16(c.buf[n:], 3)
 	n += 2
 	c.buf[n] = requestBufferCount
-	n += 1
+	n++
 	binary.LittleEndian.PutUint16(c.buf[n:], uint16(count))
 	n += 2
 	if _, err := c.stream.Write(c.buf[:n]); err != nil {
@@ -327,7 +327,7 @@ func (c *Conn) CancelSubscribe(topic string) error {
 	binary.LittleEndian.PutUint16(c.buf, uint16(len(topic)+1))
 	n := 2
 	c.buf[n] = endStream
-	n += 1
+	n++
 	copy(c.buf, topic)
 	n += len(topic)
 	binary.LittleEndian.PutUint16(c.buf[n:], 0)
