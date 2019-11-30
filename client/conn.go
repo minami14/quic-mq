@@ -178,6 +178,52 @@ func (c *Conn) Subscribe(ctx context.Context, topic string) (*SubConn, error) {
 	return subConn, nil
 }
 
+// SubscribeRequestAllBuffer subscribes to a topic and requests all buffers.
+func (c *Conn) SubscribeRequestAllBuffer(ctx context.Context, topic string) (*SubConn, error) {
+	c.subMu.Lock()
+	defer c.subMu.Unlock()
+	c.mu.Lock()
+	binary.LittleEndian.PutUint16(c.buf, uint16(len(topic)+1))
+	n := 2
+	c.buf[n] = subscribe
+	n += 1
+	copy(c.buf[n:], topic)
+	n += len(topic)
+	binary.LittleEndian.PutUint16(c.buf[n:], 1)
+	n += 2
+	c.buf[n] = requestBufferAll
+	n += 1
+	if _, err := c.stream.Write(c.buf[:n]); err != nil {
+		c.mu.Unlock()
+		return nil, err
+	}
+
+	c.mu.Unlock()
+	stream, err := c.session.AcceptUniStream(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	buf := make([]byte, c.config.MaxMessageSize)
+	n, err = c.read(buf, stream)
+	if err != nil {
+		return nil, err
+	}
+
+	if buf[0] != sub || string(buf[1:n]) != topic {
+		return nil, fmt.Errorf("failed to subscribe %v", topic)
+	}
+
+	subConn := newSubConn(topic, stream, c)
+	go func() {
+		if err := subConn.start(ctx); err != nil {
+			c.logger.Println(err)
+		}
+	}()
+
+	return subConn, nil
+}
+
 // SubscribeRequestBufferByDuration subscribes to a topic and requests buffers before specified duration.
 func (c *Conn) SubscribeRequestBufferByDuration(ctx context.Context, topic string, duration time.Duration) (*SubConn, error) {
 	c.subMu.Lock()
