@@ -122,11 +122,11 @@ func (c *client) startStream(ctx context.Context, buf []byte, stream quic.Stream
 
 		switch messageType {
 		case publishMessage:
-			n = c.broker.publish(streamName, buf[:n])
+			c.broker.publish(streamName, buf[:n])
 		case publishBufferedMessage:
 			lifetime := time.Duration(binary.LittleEndian.Uint32(buf))
 			c.broker.bufferManager.store(streamName, buf[4:n], lifetime)
-			n = c.broker.publish(streamName, buf[4:n])
+			c.broker.publish(streamName, buf[4:n])
 		case deleteBufferedMessage:
 			c.broker.bufferManager.delete(streamName, buf[:16])
 		case subscribe:
