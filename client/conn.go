@@ -5,12 +5,13 @@ import (
 	"crypto/tls"
 	"encoding/binary"
 	"fmt"
-	"github.com/lucas-clemente/quic-go"
 	"io"
 	"log"
 	"os"
 	"sync"
 	"time"
+
+	"github.com/lucas-clemente/quic-go"
 )
 
 // Conn represents a connection to a message broker.
