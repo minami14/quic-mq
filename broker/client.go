@@ -86,11 +86,6 @@ const (
 )
 
 const (
-	notRequestBuffer = iota + 1
-	requestBuffer
-)
-
-const (
 	pub = iota + 1
 	sub
 )
@@ -198,13 +193,6 @@ func (c *client) cancelPublish(topic string) {
 }
 
 func (c *client) subscribe(ctx context.Context, topic string, buf []byte) error {
-	switch buf[0] {
-	case notRequestBuffer:
-	case requestBuffer:
-	default:
-		return fmt.Errorf("invalid request %v", buf)
-	}
-
 	stream, err := c.session.OpenUniStreamSync(ctx)
 	if err != nil {
 		return err
@@ -217,9 +205,9 @@ func (c *client) subscribe(ctx context.Context, topic string, buf []byte) error 
 		return err
 	}
 
-	n := 3
-	binary.LittleEndian.PutUint16(buf[n:], uint16(len(topic)+1))
-	n += 2
+	count := int(binary.LittleEndian.Uint16(buf))
+	binary.LittleEndian.PutUint16(buf, uint16(len(topic)+1))
+	n := 2
 	buf[n] = sub
 	n++
 	copy(buf[n:n+len(topic)], topic)
@@ -228,8 +216,7 @@ func (c *client) subscribe(ctx context.Context, topic string, buf []byte) error 
 		return err
 	}
 
-	if buf[0] == requestBuffer {
-		count := int(binary.LittleEndian.Uint16(buf[1:]))
+	if count != 0 {
 		if err := c.broker.bufferManager.writeBuffers(stream, topic, buf, count); err != nil {
 			return err
 		}
