@@ -3,9 +3,11 @@ package broker
 import (
 	"context"
 	"crypto/tls"
-	"github.com/lucas-clemente/quic-go"
 	"log"
 	"os"
+	"time"
+
+	"github.com/lucas-clemente/quic-go"
 )
 
 // MessageBroker delivers messages to clients.
@@ -44,10 +46,23 @@ func (b *MessageBroker) Start(ctx context.Context, addr string, tlsConf *tls.Con
 		return err
 	}
 
+	go func() {
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				b.bufferManager.deleteExpiredMessages()
+			}
+		}
+	}()
+
 	for {
 		session, err := listener.Accept(ctx)
 		if err != nil {
-			return err
+			b.logger.Println(err)
 		}
 
 		go func() {

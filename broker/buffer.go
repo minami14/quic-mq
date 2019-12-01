@@ -101,7 +101,7 @@ func (b *messageBuffer) writeBuffer(stream quic.SendStream, buf []byte, count in
 	return nil
 }
 
-func (b *messageBuffer) deleteDeadBuffers(now time.Time, lifetime time.Duration) {
+func (b *messageBuffer) deleteExpiredMessages(now time.Time, lifetime time.Duration) {
 	b.Lock()
 	defer b.Unlock()
 	max := b.maxBuffersCount
@@ -182,9 +182,10 @@ func (m *messageBufferManager) writeBuffers(stream quic.SendStream, topic string
 	return nil
 }
 
-func (m *messageBufferManager) deleteDeadMessages(now time.Time) {
+func (m *messageBufferManager) deleteExpiredMessages() {
+	now := time.Now()
 	for _, buffer := range m.buffers {
-		buffer.deleteDeadBuffers(now, m.lifetime)
+		buffer.deleteExpiredMessages(now, m.lifetime)
 	}
 
 	m.Lock()
