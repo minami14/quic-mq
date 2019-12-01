@@ -1,8 +1,14 @@
 package broker
 
+import "time"
+
 // Config is MessageBroker config.
 type Config struct {
-	Users []User
+	Users                   []User
+	MaxMessageByte          int
+	MaxTopicCount           int
+	MaxBuffersCountPerTopic int
+	BufferLifetime          time.Duration
 }
 
 // User is information used for authentication.

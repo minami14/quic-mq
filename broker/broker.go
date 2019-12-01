@@ -3,43 +3,38 @@ package broker
 import (
 	"context"
 	"crypto/tls"
-	"log"
-	"math"
-	"os"
-
 	"github.com/lucas-clemente/quic-go"
+	"log"
+	"os"
 )
 
 // MessageBroker delivers messages to clients.
 type MessageBroker struct {
-	maxMessageSize      int
-	maxStreamCount      int
+	maxMessageByte      int
 	userManger          *userManger
 	subscriptionManager *subscriptionManager
-	bufferManager       *bufferedMessageManager
+	bufferManager       *messageBufferManager
 	logger              *log.Logger
 }
 
 // New creates an instance of MessageBroker.
-func New() *MessageBroker {
+func New(config *Config) *MessageBroker {
 	b := &MessageBroker{
-		maxMessageSize: math.MaxInt16,
-		maxStreamCount: math.MaxInt8,
+		maxMessageByte: config.MaxMessageByte,
 		userManger:     newUserManger(),
 		logger:         log.New(os.Stdout, "broker ", log.LstdFlags),
 	}
 
 	b.subscriptionManager = newStreamManager(b)
-	b.bufferManager = newBufferedMessageManager(b)
-
-	return b
-}
-
-// SetConfig sets config.
-func (b *MessageBroker) SetConfig(config *Config) {
+	b.bufferManager = newBufferedMessageManager(b, config)
+	b.bufferManager.lifetime = config.BufferLifetime
+	b.bufferManager.maxBuffersCount = config.MaxBuffersCountPerTopic
+	b.bufferManager.maxTopicCount = config.MaxTopicCount
 	for _, user := range config.Users {
 		b.userManger.register(user.UserID, user.Password)
 	}
+
+	return b
 }
 
 // Start starts a MessageBroker.
@@ -56,8 +51,8 @@ func (b *MessageBroker) Start(ctx context.Context, addr string, tlsConf *tls.Con
 		}
 
 		go func() {
-			c := newClient(b)
-			if err := c.run(ctx, session); err != nil {
+			c := newClient(b, session)
+			if err := c.run(ctx); err != nil {
 				b.logger.Println(err)
 			}
 		}()

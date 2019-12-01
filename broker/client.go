@@ -4,23 +4,24 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
-	"io"
-	"time"
 
 	"github.com/lucas-clemente/quic-go"
 )
 
 type client struct {
-	broker  *MessageBroker
-	streams map[quic.SendStream]string
-	session quic.Session
+	broker     *MessageBroker
+	stream     quic.Stream
+	subStreams map[string]quic.SendStream
+	pubStreams map[string]context.CancelFunc
+	session    quic.Session
 }
 
 func newClient(broker *MessageBroker, session quic.Session) *client {
 	return &client{
-		broker:  broker,
-		streams: map[quic.SendStream]string{},
-		session: session,
+		broker:     broker,
+		subStreams: map[string]quic.SendStream{},
+		pubStreams: map[string]context.CancelFunc{},
+		session:    session,
 	}
 }
 
@@ -34,8 +35,9 @@ func (c *client) run(ctx context.Context) error {
 		return err
 	}
 
-	buf := make([]byte, c.broker.maxMessageSize)
-	if err := c.verify(buf, stream); err != nil {
+	c.stream = stream
+	buf := make([]byte, c.broker.maxMessageByte)
+	if err := c.verify(buf); err != nil {
 		binary.LittleEndian.PutUint16(buf, 1)
 		buf[2] = authErr
 		_, _ = stream.Write(buf[:3])
@@ -48,17 +50,17 @@ func (c *client) run(ctx context.Context) error {
 		return err
 	}
 
-	return c.startStream(ctx, buf, stream)
+	return c.startStream(ctx, buf)
 }
 
-func (c *client) verify(buf []byte, stream quic.Stream) error {
-	n, err := c.read(buf, stream)
+func (c *client) verify(buf []byte) error {
+	n, err := c.read(buf, c.stream)
 	if err != nil {
 		return err
 	}
 
 	uid := string(buf[:n])
-	n, err = c.read(buf, stream)
+	n, err = c.read(buf, c.stream)
 	if err != nil {
 		return err
 	}
@@ -72,9 +74,8 @@ func (c *client) verify(buf []byte, stream quic.Stream) error {
 }
 
 const (
-	publishMessage = iota + 1
-	publishBufferedMessage
-	deleteBufferedMessage
+	startPublish = iota + 1
+	cancelPublish
 	subscribe
 	unsubscribe
 )
@@ -82,22 +83,19 @@ const (
 const (
 	statusOK = iota + 1
 	authErr
-	invalidMessage
 )
 
 const (
 	notRequestBuffer = iota + 1
-	requestBufferTime
-	requestBufferCount
-	requestBufferAll
+	requestBuffer
 )
 
 const (
-	_ = iota + 1
+	pub = iota + 1
 	sub
 )
 
-func (c *client) startStream(ctx context.Context, buf []byte, stream quic.Stream) error {
+func (c *client) startStream(ctx context.Context, buf []byte) error {
 	for {
 		select {
 		case <-ctx.Done():
@@ -105,7 +103,7 @@ func (c *client) startStream(ctx context.Context, buf []byte, stream quic.Stream
 		default:
 		}
 
-		n, err := c.read(buf, stream)
+		n, err := c.read(buf, c.stream)
 		if err != nil {
 			c.closeStreams()
 			return err
@@ -118,22 +116,20 @@ func (c *client) startStream(ctx context.Context, buf []byte, stream quic.Stream
 
 		messageType := buf[0]
 		topic := string(buf[1:n])
-		n, err = c.read(buf, stream)
+		n, err = c.read(buf, c.stream)
 		if err != nil {
 			return err
 		}
 
 		switch messageType {
-		case publishMessage:
-			c.broker.subscriptionManager.publish(topic, buf[:n])
-		case publishBufferedMessage:
-			lifetime := time.Duration(binary.LittleEndian.Uint32(buf))
-			c.broker.bufferManager.store(topic, buf[4:n], lifetime)
-			c.broker.subscriptionManager.publish(topic, buf[4:n])
-		case deleteBufferedMessage:
-			c.broker.bufferManager.delete(topic, buf[:16])
+		case startPublish:
+			if err := c.startPublish(ctx, topic); err != nil {
+				return err
+			}
+		case cancelPublish:
+			c.cancelPublish(topic)
 		case subscribe:
-			if err := c.subscribe(ctx, topic, buf[:n]); err != nil {
+			if err := c.subscribe(ctx, topic, buf); err != nil {
 				return err
 			}
 		case unsubscribe:
@@ -144,9 +140,70 @@ func (c *client) startStream(ctx context.Context, buf []byte, stream quic.Stream
 	}
 }
 
-func (c *client) subscribe(ctx context.Context, topic string, requestBuffer []byte) error {
-	if requestBuffer[0] > 3 {
-		return fmt.Errorf("invalid request %v", requestBuffer)
+const (
+	buffered = iota + 1
+	// unbuffered
+)
+
+func (c *client) startPublish(ctx context.Context, topic string) error {
+	stream, err := c.session.OpenStreamSync(ctx)
+	if err != nil {
+		return err
+	}
+
+	buf := make([]byte, c.broker.maxMessageByte)
+	binary.LittleEndian.PutUint16(buf, uint16(len(topic)+1))
+	buf[2] = pub
+	copy(buf[3:], topic)
+	if _, err := stream.Write(buf[:len(topic)+3]); err != nil {
+		return err
+	}
+
+	go func() {
+		defer func() {
+			_ = stream.Close()
+		}()
+
+		ctx, cancel := context.WithCancel(ctx)
+		c.pubStreams[topic] = cancel
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+
+			n, err := c.read(buf, stream)
+			if err != nil {
+				c.broker.logger.Println(err)
+				return
+			}
+
+			if buf[0] == buffered {
+				c.broker.bufferManager.store(topic, buf[1:n])
+			}
+
+			c.broker.subscriptionManager.publish(topic, buf[1:n])
+		}
+	}()
+
+	return nil
+}
+
+func (c *client) cancelPublish(topic string) {
+	cancel, ok := c.pubStreams[topic]
+	if ok {
+		cancel()
+		delete(c.pubStreams, topic)
+	}
+}
+
+func (c *client) subscribe(ctx context.Context, topic string, buf []byte) error {
+	switch buf[0] {
+	case notRequestBuffer:
+	case requestBuffer:
+	default:
+		return fmt.Errorf("invalid request %v", buf)
 	}
 
 	stream, err := c.session.OpenUniStreamSync(ctx)
@@ -154,7 +211,6 @@ func (c *client) subscribe(ctx context.Context, topic string, requestBuffer []by
 		return err
 	}
 
-	buf := make([]byte, 3+len(topic))
 	binary.LittleEndian.PutUint16(buf, uint16(len(topic)+1))
 	buf[2] = sub
 	copy(buf[3:], topic)
@@ -162,71 +218,56 @@ func (c *client) subscribe(ctx context.Context, topic string, requestBuffer []by
 		return err
 	}
 
-	var buffers [][]byte
-	switch requestBuffer[0] {
-	case notRequestBuffer:
-		c.broker.subscriptionManager.store(topic, stream)
-		return nil
-	case requestBufferTime:
-		duration := time.Duration(binary.LittleEndian.Uint32(requestBuffer[1:])) * time.Second
-		buffers = c.broker.bufferManager.loadByTime(topic, duration)
-	case requestBufferCount:
-		count := int(binary.LittleEndian.Uint16(requestBuffer[1:]))
-		buffers = c.broker.bufferManager.loadByCount(topic, count)
-	case requestBufferAll:
-		buffers = c.broker.bufferManager.load(topic)
+	n := 3
+	binary.LittleEndian.PutUint16(buf[n:], uint16(len(topic)+1))
+	n += 2
+	buf[n] = sub
+	n++
+	copy(buf[n:n+len(topic)], topic)
+	n += len(topic)
+	if _, err := stream.Write(buf[:n]); err != nil {
+		return err
 	}
 
-	var buffer []byte
-	for _, message := range buffers {
-		binary.LittleEndian.PutUint16(buf, uint16(len(message)))
-		buffer = append(buffer, buf[:2]...)
-		buffer = append(buffer, message...)
-	}
-
-	if len(buffer) > 2 {
-		if _, err := stream.Write(buffer); err != nil {
-			_ = stream.Close()
+	if buf[0] == requestBuffer {
+		count := int(binary.LittleEndian.Uint16(buf[1:]))
+		if err := c.broker.bufferManager.writeBuffers(stream, topic, buf, count); err != nil {
 			return err
 		}
 	}
 
 	c.broker.subscriptionManager.store(topic, stream)
-	c.streams[stream] = topic
+	c.subStreams[topic] = stream
 	return nil
 }
 
 func (c *client) unsubscribe(topic string) {
-	for stream, t := range c.streams {
-		if t == topic {
-			c.broker.subscriptionManager.delete(topic, stream.StreamID())
-			_, _ = stream.Write([]byte{0, 0})
-			_ = stream.Close()
-			return
-		}
-	}
+	stream := c.subStreams[topic]
+	c.broker.subscriptionManager.delete(topic, stream.StreamID())
+	_, _ = stream.Write([]byte{0, 0})
+	_ = stream.Close()
 }
 
 func (c *client) closeStreams() {
-	for stream, topic := range c.streams {
+	for topic, stream := range c.subStreams {
 		c.broker.subscriptionManager.delete(topic, stream.StreamID())
 		_ = stream.Close()
 	}
 }
 
-func (c *client) read(buf []byte, reader io.Reader) (int, error) {
-	if _, err := reader.Read(buf[:2]); err != nil {
+func (c *client) read(buf []byte, stream quic.Stream) (int, error) {
+	if _, err := stream.Read(buf[:2]); err != nil {
 		return 0, err
 	}
 
 	size := int(binary.LittleEndian.Uint16(buf))
-	if size > c.broker.maxMessageSize {
-		return 0, fmt.Errorf("over max message size %v %v", c.broker.maxMessageSize, size)
+	if size > c.broker.maxMessageByte {
+		return 0, fmt.Errorf("over max message size %v %v", c.broker.maxMessageByte, size)
 	}
 
 	sum := 0
 	for sum < size {
-		n, err := reader.Read(buf[sum:size])
+		n, err := stream.Read(buf[sum:size])
 		if err != nil {
 			return 0, err
 		}

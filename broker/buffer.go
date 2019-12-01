@@ -1,196 +1,202 @@
 package broker
 
 import (
-	"sort"
+	"encoding/binary"
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
+	"github.com/lucas-clemente/quic-go"
 )
 
-type bufferedMessage struct {
+type message struct {
 	buf      []byte
-	create   time.Time
-	lifetime time.Duration
+	createAt time.Time
 }
 
-type bufferedMessageManager struct {
+type messageBuffer struct {
 	*sync.RWMutex
-	broker   *MessageBroker
-	lockers  map[string]*sync.RWMutex
-	messages map[string]map[string]*bufferedMessage
+	messages        []*message
+	headIndex       int
+	nextIndex       int
+	count           int
+	maxBuffersCount int
 }
 
-func newBufferedMessageManager(broker *MessageBroker) *bufferedMessageManager {
-	return &bufferedMessageManager{
-		RWMutex:  new(sync.RWMutex),
-		broker:   broker,
-		lockers:  map[string]*sync.RWMutex{},
-		messages: map[string]map[string]*bufferedMessage{},
+func newMessageBuffer(maxBuffersCount int) *messageBuffer {
+	return &messageBuffer{
+		RWMutex:         new(sync.RWMutex),
+		messages:        make([]*message, maxBuffersCount),
+		maxBuffersCount: maxBuffersCount,
 	}
 }
 
-func (m *bufferedMessageManager) store(streamName string, buf []byte, duration time.Duration) []byte {
+func (b *messageBuffer) store(msg *message) {
+	b.Lock()
+	defer b.Unlock()
+	b.messages[b.nextIndex] = msg
+	b.nextIndex++
+	if b.nextIndex >= b.maxBuffersCount {
+		b.nextIndex = 0
+	}
+
+	if b.count < b.maxBuffersCount {
+		b.count++
+	} else {
+		b.headIndex++
+		if b.headIndex >= b.maxBuffersCount {
+			b.headIndex = 0
+		}
+	}
+}
+
+func (b *messageBuffer) writeBuffer(stream quic.SendStream, buf []byte, count int) error {
+	b.RLock()
+	defer b.RUnlock()
+	if b.count < count {
+		count = b.count
+	}
+
+	n := 0
+	index := b.nextIndex - count
+	if index < 0 {
+		for i := b.maxBuffersCount + index; i < b.maxBuffersCount; i++ {
+			msg := b.messages[i].buf
+			if n > 0 && len(msg)+2+n >= len(buf) {
+				if _, err := stream.Write(buf[:n]); err != nil {
+					return err
+				}
+
+				n = 0
+			}
+
+			binary.LittleEndian.PutUint16(buf[n:], uint16(len(msg)))
+			n += 2
+			copy(buf[n:len(msg)+n], msg)
+			n += len(msg)
+		}
+		index = 0
+	}
+
+	for ; index < b.nextIndex; {
+		msg := b.messages[index].buf
+		if n > 0 && len(msg)+2+n >= len(buf) {
+			if _, err := stream.Write(buf[:n]); err != nil {
+				return err
+			}
+
+			n = 0
+		}
+
+		binary.LittleEndian.PutUint16(buf[n:], uint16(len(msg)))
+		n += 2
+		copy(buf[n:len(msg)+n], msg)
+	}
+
+	if n > 0 {
+		if _, err := stream.Write(buf[:n]); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (b *messageBuffer) deleteDeadBuffers(now time.Time, lifetime time.Duration) {
+	b.Lock()
+	defer b.Unlock()
+	max := b.maxBuffersCount
+	for ; b.headIndex < max; b.headIndex++ {
+		msg := b.messages[b.headIndex]
+		if msg == nil {
+			return
+		}
+
+		if now.Sub(msg.createAt) < lifetime {
+			return
+		}
+
+		b.messages[b.headIndex] = nil
+		b.headIndex++
+		b.count--
+		if b.headIndex >= b.maxBuffersCount {
+			b.headIndex = 0
+			max = b.nextIndex
+		}
+	}
+}
+
+type messageBufferManager struct {
+	*sync.RWMutex
+	broker          *MessageBroker
+	lockers         map[string]*sync.RWMutex
+	buffers         map[string]*messageBuffer
+	lifetime        time.Duration
+	maxBuffersCount int
+	maxTopicCount   int
+}
+
+func newBufferedMessageManager(broker *MessageBroker, config *Config) *messageBufferManager {
+	return &messageBufferManager{
+		RWMutex:         new(sync.RWMutex),
+		broker:          broker,
+		lockers:         map[string]*sync.RWMutex{},
+		buffers:         map[string]*messageBuffer{},
+		lifetime:        config.BufferLifetime,
+		maxBuffersCount: config.MaxBuffersCountPerTopic,
+		maxTopicCount:   config.MaxTopicCount,
+	}
+}
+
+func (m *messageBufferManager) store(topic string, buf []byte) {
 	m.Lock()
-	locker, ok := m.lockers[streamName]
+	buffers, ok := m.buffers[topic]
 	if !ok {
-		locker = new(sync.RWMutex)
-		m.lockers[streamName] = locker
-	}
+		if len(m.buffers) >= m.maxTopicCount {
+			return
+		}
 
-	messages, ok := m.messages[streamName]
-	if !ok {
-		messages = map[string]*bufferedMessage{}
-		m.messages[streamName] = messages
+		buffers = newMessageBuffer(m.maxBuffersCount)
+		m.buffers[topic] = buffers
 	}
 
 	m.Unlock()
 	cp := make([]byte, len(buf))
 	copy(cp, buf)
-	messageID := uuid.New()
-	message := &bufferedMessage{
+	msg := &message{
 		buf:      cp,
-		create:   time.Now(),
-		lifetime: duration,
+		createAt: time.Now(),
 	}
 
-	locker.Lock()
-	messages[string(messageID[:])] = message
-	locker.Unlock()
-	return messageID[:]
-}
-
-func (m *bufferedMessageManager) loadByTime(streamName string, duration time.Duration) (buffers [][]byte) {
-	locker, ok := m.lockers[streamName]
-	if !ok {
-		return
-	}
-
-	messages, ok := m.messages[streamName]
-	if !ok {
-		return
-	}
-
-	locker.RLock()
-	for _, message := range messages {
-		if time.Now().Sub(message.create) < duration {
-			buffers = append(buffers, message.buf)
-		}
-	}
-
-	locker.RUnlock()
+	buffers.store(msg)
 	return
 }
 
-func (m *bufferedMessageManager) loadByCount(streamName string, count int) (buffers [][]byte) {
-	locker, ok := m.lockers[streamName]
-	if !ok {
-		return
+func (m *messageBufferManager) writeBuffers(stream quic.SendStream, topic string, buf []byte, count int) error {
+	m.RLock()
+	defer m.RUnlock()
+	buffer, ok := m.buffers[topic]
+	if ok {
+		return buffer.writeBuffer(stream, buf, count)
 	}
 
-	messages, ok := m.messages[streamName]
-	if !ok {
-		return
-	}
-
-	locker.RLock()
-	var tmpMessages []*bufferedMessage
-	for _, message := range messages {
-		tmpMessages = append(tmpMessages, message)
-	}
-
-	locker.RUnlock()
-	sort.Slice(tmpMessages, func(i, j int) bool {
-		return tmpMessages[i].create.After(tmpMessages[j].create)
-	})
-
-	for i, message := range tmpMessages {
-		if i >= count {
-			break
-		}
-
-		buffers = append(buffers, message.buf)
-	}
-
-	return
+	return nil
 }
 
-func (m *bufferedMessageManager) load(streamName string) (buffers [][]byte) {
-	locker, ok := m.lockers[streamName]
-	if !ok {
-		return
-	}
-
-	messages, ok := m.messages[streamName]
-	if !ok {
-		return
-	}
-
-	locker.RLock()
-	for _, message := range messages {
-		buffers = append(buffers, message.buf)
-	}
-
-	locker.RUnlock()
-	return
-}
-
-func (m *bufferedMessageManager) delete(streamName string, messageID []byte) {
-	locker, ok := m.lockers[streamName]
-	if !ok {
-		return
-	}
-
-	messages, ok := m.messages[streamName]
-	if !ok {
-		return
-	}
-
-	locker.Lock()
-	delete(messages, string(messageID))
-	locker.Unlock()
-}
-
-func (m *bufferedMessageManager) deleteDeadMessages() {
-	var deadStreams []string
-	for streamName, messages := range m.messages {
-		locker, ok := m.lockers[streamName]
-		if !ok {
-			continue
-		}
-
-		var deadMessages []string
-		locker.RLock()
-		for messageID, message := range messages {
-			if time.Now().Sub(message.create) >= message.lifetime {
-				deadMessages = append(deadMessages, messageID)
-			}
-		}
-
-		locker.RUnlock()
-		if len(deadMessages) == 0 {
-			continue
-		}
-
-		locker.Lock()
-		for _, messageID := range deadMessages {
-			delete(messages, messageID)
-		}
-
-		locker.Unlock()
-		if len(messages) == 0 {
-			deadStreams = append(deadStreams, streamName)
-		}
-	}
-
-	if len(deadStreams) == 0 {
-		return
+func (m *messageBufferManager) deleteDeadMessages(now time.Time) {
+	for _, buffer := range m.buffers {
+		buffer.deleteDeadBuffers(now, m.lifetime)
 	}
 
 	m.Lock()
-	for _, streamName := range deadStreams {
-		delete(m.messages, streamName)
+	defer m.Unlock()
+	var deadBuffers []string
+	for topic, buffer := range m.buffers {
+		if buffer.count <= 0 {
+			deadBuffers = append(deadBuffers, topic)
+		}
 	}
 
-	m.Unlock()
+	for _, topic := range deadBuffers {
+		delete(m.buffers, topic)
+	}
 }
