@@ -116,8 +116,7 @@ func (c *client) startStream(ctx context.Context, buf []byte) error {
 
 		messageType := buf[0]
 		topic := string(buf[1:n])
-		n, err = c.read(buf, c.stream)
-		if err != nil {
+		if _, err := c.read(buf, c.stream); err != nil {
 			return err
 		}
 
