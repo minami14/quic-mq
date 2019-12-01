@@ -133,7 +133,7 @@ func (c *Conn) Publish(topic string, data []byte, buffer bool, duration time.Dur
 }
 
 // Subscribe subscribes to a topic.
-func (c *Conn) Subscribe(ctx context.Context, topic string) (*SubConn, error) {
+func (c *Conn) Subscribe(ctx context.Context, topic string) (*SubStream, error) {
 	c.subMu.Lock()
 	defer c.subMu.Unlock()
 	c.mu.Lock()
@@ -179,7 +179,7 @@ func (c *Conn) Subscribe(ctx context.Context, topic string) (*SubConn, error) {
 }
 
 // SubscribeRequestAllBuffer subscribes to a topic and requests all buffers.
-func (c *Conn) SubscribeRequestAllBuffer(ctx context.Context, topic string) (*SubConn, error) {
+func (c *Conn) SubscribeRequestAllBuffer(ctx context.Context, topic string) (*SubStream, error) {
 	c.subMu.Lock()
 	defer c.subMu.Unlock()
 	c.mu.Lock()
@@ -225,7 +225,7 @@ func (c *Conn) SubscribeRequestAllBuffer(ctx context.Context, topic string) (*Su
 }
 
 // SubscribeRequestBufferByDuration subscribes to a topic and requests buffers before specified duration.
-func (c *Conn) SubscribeRequestBufferByDuration(ctx context.Context, topic string, duration time.Duration) (*SubConn, error) {
+func (c *Conn) SubscribeRequestBufferByDuration(ctx context.Context, topic string, duration time.Duration) (*SubStream, error) {
 	c.subMu.Lock()
 	defer c.subMu.Unlock()
 	c.mu.Lock()
@@ -273,7 +273,7 @@ func (c *Conn) SubscribeRequestBufferByDuration(ctx context.Context, topic strin
 }
 
 // SubscribeRequestBufferByCount subscribes to a topic and requests the specified count of buffers.
-func (c *Conn) SubscribeRequestBufferByCount(ctx context.Context, topic string, count int) (*SubConn, error) {
+func (c *Conn) SubscribeRequestBufferByCount(ctx context.Context, topic string, count int) (*SubStream, error) {
 	c.subMu.Lock()
 	defer c.subMu.Unlock()
 	c.mu.Lock()

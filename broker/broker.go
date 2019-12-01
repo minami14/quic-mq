@@ -12,12 +12,12 @@ import (
 
 // MessageBroker delivers messages to clients.
 type MessageBroker struct {
-	maxMessageSize int
-	maxStreamCount int
-	userManger     *userManger
-	streamManager  *streamManager
-	bufferManager  *bufferedMessageManager
-	logger         *log.Logger
+	maxMessageSize      int
+	maxStreamCount      int
+	userManger          *userManger
+	subscriptionManager *subscriptionManager
+	bufferManager       *bufferedMessageManager
+	logger              *log.Logger
 }
 
 // New creates an instance of MessageBroker.
@@ -29,7 +29,7 @@ func New() *MessageBroker {
 		logger:         log.New(os.Stdout, "broker ", log.LstdFlags),
 	}
 
-	b.streamManager = newStreamManager(b)
+	b.subscriptionManager = newStreamManager(b)
 	b.bufferManager = newBufferedMessageManager(b)
 
 	return b
@@ -62,12 +62,4 @@ func (b *MessageBroker) Start(ctx context.Context, addr string, tlsConf *tls.Con
 			}
 		}()
 	}
-}
-
-func (b *MessageBroker) publish(streamName string, buf []byte) int {
-	return b.streamManager.publish(streamName, buf)
-}
-
-func (b *MessageBroker) subscribe(streamName string, requestBuffer byte, stream quic.SendStream) {
-	b.streamManager.store(streamName, stream)
 }

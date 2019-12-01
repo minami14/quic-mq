@@ -11,15 +11,21 @@ import (
 )
 
 type client struct {
-	broker *MessageBroker
+	broker  *MessageBroker
+	streams map[quic.SendStream]string
+	session quic.Session
 }
 
-func newClient(broker *MessageBroker) *client {
-	return &client{broker: broker}
+func newClient(broker *MessageBroker, session quic.Session) *client {
+	return &client{
+		broker:  broker,
+		streams: map[quic.SendStream]string{},
+		session: session,
+	}
 }
 
-func (c *client) run(ctx context.Context, session quic.Session) error {
-	stream, err := session.AcceptStream(ctx)
+func (c *client) run(ctx context.Context) error {
+	stream, err := c.session.AcceptStream(ctx)
 	defer func() {
 		_ = stream.Close()
 	}()
@@ -42,7 +48,7 @@ func (c *client) run(ctx context.Context, session quic.Session) error {
 		return err
 	}
 
-	return c.startStream(ctx, buf, stream, session)
+	return c.startStream(ctx, buf, stream)
 }
 
 func (c *client) verify(buf []byte, stream quic.Stream) error {
@@ -70,7 +76,7 @@ const (
 	publishBufferedMessage
 	deleteBufferedMessage
 	subscribe
-	endStream
+	unsubscribe
 )
 
 const (
@@ -91,8 +97,7 @@ const (
 	sub
 )
 
-func (c *client) startStream(ctx context.Context, buf []byte, stream quic.Stream, session quic.Session) error {
-	streams := map[quic.SendStream]string{}
+func (c *client) startStream(ctx context.Context, buf []byte, stream quic.Stream) error {
 	for {
 		select {
 		case <-ctx.Done():
@@ -102,19 +107,17 @@ func (c *client) startStream(ctx context.Context, buf []byte, stream quic.Stream
 
 		n, err := c.read(buf, stream)
 		if err != nil {
+			c.closeStreams()
 			return err
 		}
 
 		if n < 2 {
-			for stream, streamName := range streams {
-				c.broker.streamManager.delete(streamName, stream.StreamID())
-				_ = stream.Close()
-			}
+			c.closeStreams()
 			return nil
 		}
 
 		messageType := buf[0]
-		streamName := string(buf[1:n])
+		topic := string(buf[1:n])
 		n, err = c.read(buf, stream)
 		if err != nil {
 			return err
@@ -122,65 +125,56 @@ func (c *client) startStream(ctx context.Context, buf []byte, stream quic.Stream
 
 		switch messageType {
 		case publishMessage:
-			c.broker.publish(streamName, buf[:n])
+			c.broker.subscriptionManager.publish(topic, buf[:n])
 		case publishBufferedMessage:
 			lifetime := time.Duration(binary.LittleEndian.Uint32(buf))
-			c.broker.bufferManager.store(streamName, buf[4:n], lifetime)
-			c.broker.publish(streamName, buf[4:n])
+			c.broker.bufferManager.store(topic, buf[4:n], lifetime)
+			c.broker.subscriptionManager.publish(topic, buf[4:n])
 		case deleteBufferedMessage:
-			c.broker.bufferManager.delete(streamName, buf[:16])
+			c.broker.bufferManager.delete(topic, buf[:16])
 		case subscribe:
-			s, err := c.subscribe(ctx, streamName, buf[:n], session)
-			if err != nil {
+			if err := c.subscribe(ctx, topic, buf[:n]); err != nil {
 				return err
 			}
-			streams[s] = streamName
-		case endStream:
-			for stream, topic := range streams {
-				if topic == streamName {
-					c.broker.streamManager.delete(streamName, stream.StreamID())
-					_, _ = stream.Write([]byte{0, 0})
-					_ = stream.Close()
-					break
-				}
-			}
+		case unsubscribe:
+			c.unsubscribe(topic)
 		default:
 			return fmt.Errorf("invalid message %v", buf)
 		}
 	}
 }
 
-func (c *client) subscribe(ctx context.Context, streamName string, requestBuffer []byte, session quic.Session) (quic.SendStream, error) {
+func (c *client) subscribe(ctx context.Context, topic string, requestBuffer []byte) error {
 	if requestBuffer[0] > 3 {
-		return nil, fmt.Errorf("invalid request %v", requestBuffer)
+		return fmt.Errorf("invalid request %v", requestBuffer)
 	}
 
-	stream, err := session.OpenUniStreamSync(ctx)
+	stream, err := c.session.OpenUniStreamSync(ctx)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	buf := make([]byte, 3+len(streamName))
-	binary.LittleEndian.PutUint16(buf, uint16(len(streamName)+1))
+	buf := make([]byte, 3+len(topic))
+	binary.LittleEndian.PutUint16(buf, uint16(len(topic)+1))
 	buf[2] = sub
-	copy(buf[3:], streamName)
+	copy(buf[3:], topic)
 	if _, err := stream.Write(buf); err != nil {
-		return nil, err
+		return err
 	}
 
 	var buffers [][]byte
 	switch requestBuffer[0] {
 	case notRequestBuffer:
-		c.broker.streamManager.store(streamName, stream)
-		return stream, nil
+		c.broker.subscriptionManager.store(topic, stream)
+		return nil
 	case requestBufferTime:
 		duration := time.Duration(binary.LittleEndian.Uint32(requestBuffer[1:])) * time.Second
-		buffers = c.broker.bufferManager.loadByTime(streamName, duration)
+		buffers = c.broker.bufferManager.loadByTime(topic, duration)
 	case requestBufferCount:
 		count := int(binary.LittleEndian.Uint16(requestBuffer[1:]))
-		buffers = c.broker.bufferManager.loadByCount(streamName, count)
+		buffers = c.broker.bufferManager.loadByCount(topic, count)
 	case requestBufferAll:
-		buffers = c.broker.bufferManager.load(streamName)
+		buffers = c.broker.bufferManager.load(topic)
 	}
 
 	var buffer []byte
@@ -193,12 +187,31 @@ func (c *client) subscribe(ctx context.Context, streamName string, requestBuffer
 	if len(buffer) > 2 {
 		if _, err := stream.Write(buffer); err != nil {
 			_ = stream.Close()
-			return nil, err
+			return err
 		}
 	}
 
-	c.broker.streamManager.store(streamName, stream)
-	return stream, nil
+	c.broker.subscriptionManager.store(topic, stream)
+	c.streams[stream] = topic
+	return nil
+}
+
+func (c *client) unsubscribe(topic string) {
+	for stream, t := range c.streams {
+		if t == topic {
+			c.broker.subscriptionManager.delete(topic, stream.StreamID())
+			_, _ = stream.Write([]byte{0, 0})
+			_ = stream.Close()
+			return
+		}
+	}
+}
+
+func (c *client) closeStreams() {
+	for stream, topic := range c.streams {
+		c.broker.subscriptionManager.delete(topic, stream.StreamID())
+		_ = stream.Close()
+	}
 }
 
 func (c *client) read(buf []byte, reader io.Reader) (int, error) {

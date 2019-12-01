@@ -7,15 +7,15 @@ import (
 	"github.com/lucas-clemente/quic-go"
 )
 
-type streamManager struct {
+type subscriptionManager struct {
 	*sync.RWMutex
 	broker  *MessageBroker
 	lockers map[string]*sync.RWMutex
 	streams map[string]map[quic.StreamID]quic.SendStream
 }
 
-func newStreamManager(broker *MessageBroker) *streamManager {
-	return &streamManager{
+func newStreamManager(broker *MessageBroker) *subscriptionManager {
+	return &subscriptionManager{
 		RWMutex: new(sync.RWMutex),
 		broker:  broker,
 		lockers: map[string]*sync.RWMutex{},
@@ -23,18 +23,18 @@ func newStreamManager(broker *MessageBroker) *streamManager {
 	}
 }
 
-func (m *streamManager) store(streamName string, stream quic.SendStream) {
+func (m *subscriptionManager) store(topic string, stream quic.SendStream) {
 	m.RLock()
-	locker, ok := m.lockers[streamName]
+	locker, ok := m.lockers[topic]
 	if !ok {
 		locker = new(sync.RWMutex)
-		m.lockers[streamName] = locker
-		m.streams[streamName] = map[quic.StreamID]quic.SendStream{}
+		m.lockers[topic] = locker
+		m.streams[topic] = map[quic.StreamID]quic.SendStream{}
 	}
 
 	m.RUnlock()
 	locker.Lock()
-	streams := m.streams[streamName]
+	streams := m.streams[topic]
 	if stream, ok := streams[stream.StreamID()]; ok {
 		_ = stream.Close()
 	}
@@ -42,26 +42,26 @@ func (m *streamManager) store(streamName string, stream quic.SendStream) {
 	locker.Unlock()
 }
 
-func (m *streamManager) delete(streamName string, streamID quic.StreamID) {
-	locker, ok := m.lockers[streamName]
+func (m *subscriptionManager) delete(topic string, streamID quic.StreamID) {
+	locker, ok := m.lockers[topic]
 	if !ok {
 		return
 	}
 
 	locker.Lock()
-	streams := m.streams[streamName]
+	streams := m.streams[topic]
 	delete(streams, streamID)
 	if len(streams) == 0 {
 		m.Lock()
-		delete(m.streams, streamName)
-		delete(m.lockers, streamName)
+		delete(m.streams, topic)
+		delete(m.lockers, topic)
 		m.Unlock()
 	}
 	locker.Unlock()
 }
 
-func (m *streamManager) publish(streamName string, message []byte) int {
-	locker, ok := m.lockers[streamName]
+func (m *subscriptionManager) publish(topic string, message []byte) int {
+	locker, ok := m.lockers[topic]
 	if !ok {
 		return 0
 	}
@@ -72,7 +72,7 @@ func (m *streamManager) publish(streamName string, message []byte) int {
 	locker.RLock()
 	count := 0
 	var deadStreams []quic.StreamID
-	streams := m.streams[streamName]
+	streams := m.streams[topic]
 	for id, stream := range streams {
 		if _, err := stream.Write(buf); err != nil {
 			m.broker.logger.Println(err)
@@ -88,8 +88,8 @@ func (m *streamManager) publish(streamName string, message []byte) int {
 
 	if len(streams) == 0 {
 		m.Lock()
-		delete(m.streams, streamName)
-		delete(m.lockers, streamName)
+		delete(m.streams, topic)
+		delete(m.lockers, topic)
 		m.Unlock()
 	}
 
