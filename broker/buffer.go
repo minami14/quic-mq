@@ -77,7 +77,7 @@ func (b *messageBuffer) writeBuffer(stream quic.SendStream, buf []byte, count in
 		index = 0
 	}
 
-	for ; index < b.nextIndex; {
+	for index < b.nextIndex {
 		msg := b.messages[index].buf
 		if n > 0 && len(msg)+2+n >= len(buf) {
 			if _, err := stream.Write(buf[:n]); err != nil {
