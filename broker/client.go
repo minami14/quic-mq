@@ -163,7 +163,7 @@ func (c *client) startPublish(ctx context.Context, topic string) error {
 				return
 			default:
 			}
-			
+
 			n, err := c.read(buf, stream)
 			if err != nil {
 				c.broker.logger.Println(err)
