@@ -7,6 +7,7 @@ import (
 	"github.com/lucas-clemente/quic-go"
 )
 
+// PublishStream is a stream for publish message.
 type PublishStream struct {
 	topic  string
 	stream quic.Stream
@@ -34,6 +35,7 @@ const (
 	Unbuffered
 )
 
+// Publish publishes message.
 func (s *PublishStream) Publish(data []byte, flag PublishFlag) error {
 	s.Lock()
 	defer s.Unlock()
@@ -50,6 +52,7 @@ func (s *PublishStream) Publish(data []byte, flag PublishFlag) error {
 	return nil
 }
 
+// Close closes the stream.
 func (s *PublishStream) Close() error {
 	return s.conn.cancelPublish(s.topic)
 }
