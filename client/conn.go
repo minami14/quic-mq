@@ -16,13 +16,13 @@ import (
 
 // Conn represents a connection to a message broker.
 type Conn struct {
-	config  *Config
-	stream  quic.Stream
-	session quic.Session
-	buf     []byte
-	mu      *sync.Mutex
-	subMu   *sync.Mutex
-	logger  *log.Logger
+	config            *Config
+	stream            quic.Stream
+	session           quic.Session
+	buf               []byte
+	mutex             *sync.Mutex
+	acceptStreamMutex *sync.Mutex
+	logger            *log.Logger
 }
 
 const (
@@ -30,32 +30,24 @@ const (
 )
 
 const (
-	publishMessage = iota + 1
-	publishBufferedMessage
-	_ // deleteBufferedMessage
+	startPublish = iota + 1
+	cancelPublish
 	subscribe
-	endStream
+	unsubscribe
 )
 
 const (
-	notRequestBuffer = iota + 1
-	requestBufferTime
-	requestBufferCount
-	requestBufferAll
-)
-
-const (
-	_ = iota + 1
+	pub = iota + 1
 	sub
 )
 
 // Dial connects to the message broker.
 func Dial(ctx context.Context, address string, tlsConf *tls.Config, config *Config) (*Conn, error) {
 	conn := &Conn{
-		config: config,
-		logger: log.New(os.Stdout, "client ", log.LstdFlags),
-		mu:     new(sync.Mutex),
-		subMu:  new(sync.Mutex),
+		config:            config,
+		logger:            log.New(os.Stdout, "client ", log.LstdFlags),
+		mutex:             new(sync.Mutex),
+		acceptStreamMutex: new(sync.Mutex),
 	}
 
 	session, err := quic.DialAddrContext(ctx, address, tlsConf, nil)
@@ -99,14 +91,47 @@ func Dial(ctx context.Context, address string, tlsConf *tls.Config, config *Conf
 	return conn, err
 }
 
+func (c *Conn) CreatePublishStream(ctx context.Context, topic string) (*PublishStream, error) {
+	c.acceptStreamMutex.Lock()
+	defer c.acceptStreamMutex.Unlock()
+	c.mutex.Lock()
+	binary.LittleEndian.PutUint16(c.buf, uint16(len(topic)+1))
+	n := 2
+	c.buf[n] = startPublish
+	n++
+	copy(c.buf[n:], topic)
+	n += len(topic)
+	if _, err := c.stream.Write(c.buf[:n]); err != nil {
+		return nil, err
+	}
+
+	c.mutex.Unlock()
+	stream, err := c.session.AcceptStream(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	buf := make([]byte, c.config.MaxMessageSize)
+	n, err = c.read(buf, stream)
+	if err != nil {
+		return nil, err
+	}
+
+	if buf[0] != pub || string(buf[1:n]) != topic {
+		return nil, fmt.Errorf("failed to create publish stream %v", topic)
+	}
+
+	return newPublishStream(topic, stream, c), nil
+}
+
 // Publish publishes a message.
 func (c *Conn) Publish(topic string, data []byte, buffer bool, duration time.Duration) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
 	binary.LittleEndian.PutUint16(c.buf, uint16(len(topic)+1))
 	n := 2
 	if buffer {
-		c.buf[n] = publishBufferedMessage
+		c.buf[n] = cancelPublish
 		n++
 		copy(c.buf[n:], topic)
 		n += len(topic)
@@ -115,7 +140,7 @@ func (c *Conn) Publish(topic string, data []byte, buffer bool, duration time.Dur
 		binary.LittleEndian.PutUint32(c.buf[n:], uint32(duration/time.Second))
 		n += 4
 	} else {
-		c.buf[n] = publishMessage
+		c.buf[n] = startPublish
 		n++
 		copy(c.buf[n:], topic)
 		n += len(topic)
@@ -132,169 +157,45 @@ func (c *Conn) Publish(topic string, data []byte, buffer bool, duration time.Dur
 	return nil
 }
 
+func (c *Conn) cancelPublish(topic string) error {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	binary.LittleEndian.PutUint16(c.buf, uint16(len(topic)+1))
+	n := 2
+	c.buf[n] = cancelPublish
+	n++
+	copy(c.buf, topic)
+	n += len(topic)
+	binary.LittleEndian.PutUint16(c.buf[n:], 0)
+	n += 2
+	if _, err := c.stream.Write(c.buf[:n]); err != nil {
+		return err
+	}
+
+	return nil
+}
+
 // Subscribe subscribes to a topic.
-func (c *Conn) Subscribe(ctx context.Context, topic string) (*SubStream, error) {
-	c.subMu.Lock()
-	defer c.subMu.Unlock()
-	c.mu.Lock()
+func (c *Conn) Subscribe(ctx context.Context, topic string, count int) (*SubscribeStream, error) {
+	c.acceptStreamMutex.Lock()
+	defer c.acceptStreamMutex.Unlock()
+	c.mutex.Lock()
 	binary.LittleEndian.PutUint16(c.buf, uint16(len(topic)+1))
 	n := 2
 	c.buf[n] = subscribe
 	n++
 	copy(c.buf[n:], topic)
 	n += len(topic)
-	binary.LittleEndian.PutUint16(c.buf[n:], 1)
+	binary.LittleEndian.PutUint16(c.buf[n:], 2)
 	n += 2
-	c.buf[n] = notRequestBuffer
-	n++
-	if _, err := c.stream.Write(c.buf[:n]); err != nil {
-		c.mu.Unlock()
-		return nil, err
-	}
-
-	c.mu.Unlock()
-	stream, err := c.session.AcceptUniStream(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	buf := make([]byte, c.config.MaxMessageSize)
-	n, err = c.read(buf, stream)
-	if err != nil {
-		return nil, err
-	}
-
-	if buf[0] != sub || string(buf[1:n]) != topic {
-		return nil, fmt.Errorf("failed to subscribe %v", topic)
-	}
-
-	subConn := newSubConn(topic, stream, c)
-	go func() {
-		if err := subConn.start(ctx); err != nil {
-			c.logger.Println(err)
-		}
-	}()
-
-	return subConn, nil
-}
-
-// SubscribeRequestAllBuffer subscribes to a topic and requests all buffers.
-func (c *Conn) SubscribeRequestAllBuffer(ctx context.Context, topic string) (*SubStream, error) {
-	c.subMu.Lock()
-	defer c.subMu.Unlock()
-	c.mu.Lock()
-	binary.LittleEndian.PutUint16(c.buf, uint16(len(topic)+1))
-	n := 2
-	c.buf[n] = subscribe
-	n++
-	copy(c.buf[n:], topic)
-	n += len(topic)
-	binary.LittleEndian.PutUint16(c.buf[n:], 1)
-	n += 2
-	c.buf[n] = requestBufferAll
-	n++
-	if _, err := c.stream.Write(c.buf[:n]); err != nil {
-		c.mu.Unlock()
-		return nil, err
-	}
-
-	c.mu.Unlock()
-	stream, err := c.session.AcceptUniStream(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	buf := make([]byte, c.config.MaxMessageSize)
-	n, err = c.read(buf, stream)
-	if err != nil {
-		return nil, err
-	}
-
-	if buf[0] != sub || string(buf[1:n]) != topic {
-		return nil, fmt.Errorf("failed to subscribe %v", topic)
-	}
-
-	subConn := newSubConn(topic, stream, c)
-	go func() {
-		if err := subConn.start(ctx); err != nil {
-			c.logger.Println(err)
-		}
-	}()
-
-	return subConn, nil
-}
-
-// SubscribeRequestBufferByDuration subscribes to a topic and requests buffers before specified duration.
-func (c *Conn) SubscribeRequestBufferByDuration(ctx context.Context, topic string, duration time.Duration) (*SubStream, error) {
-	c.subMu.Lock()
-	defer c.subMu.Unlock()
-	c.mu.Lock()
-	binary.LittleEndian.PutUint16(c.buf, uint16(len(topic)+1))
-	n := 2
-	c.buf[n] = subscribe
-	n++
-	copy(c.buf[n:], topic)
-	n += len(topic)
-	binary.LittleEndian.PutUint16(c.buf[n:], 5)
-	n += 2
-	c.buf[n] = requestBufferTime
-	n++
-	binary.LittleEndian.PutUint32(c.buf[n:], uint32(duration))
-	n += 4
-	if _, err := c.stream.Write(c.buf[:n]); err != nil {
-		c.mu.Unlock()
-		return nil, err
-	}
-
-	c.mu.Unlock()
-	stream, err := c.session.AcceptUniStream(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	buf := make([]byte, c.config.MaxMessageSize)
-	n, err = c.read(buf, stream)
-	if err != nil {
-		return nil, err
-	}
-
-	if buf[0] != sub || string(buf[1:n]) != topic {
-		return nil, fmt.Errorf("failed to subscribe %v", topic)
-	}
-
-	subConn := newSubConn(topic, stream, c)
-	go func() {
-		if err := subConn.start(ctx); err != nil {
-			c.logger.Println(err)
-		}
-	}()
-
-	return subConn, nil
-}
-
-// SubscribeRequestBufferByCount subscribes to a topic and requests the specified count of buffers.
-func (c *Conn) SubscribeRequestBufferByCount(ctx context.Context, topic string, count int) (*SubStream, error) {
-	c.subMu.Lock()
-	defer c.subMu.Unlock()
-	c.mu.Lock()
-	binary.LittleEndian.PutUint16(c.buf, uint16(len(topic)+1))
-	n := 2
-	c.buf[n] = subscribe
-	n++
-	copy(c.buf[n:], topic)
-	n += len(topic)
-	binary.LittleEndian.PutUint16(c.buf[n:], 3)
-	n += 2
-	c.buf[n] = requestBufferCount
-	n++
 	binary.LittleEndian.PutUint16(c.buf[n:], uint16(count))
 	n += 2
 	if _, err := c.stream.Write(c.buf[:n]); err != nil {
-		c.mu.Unlock()
+		c.mutex.Unlock()
 		return nil, err
 	}
 
-	c.mu.Unlock()
+	c.mutex.Unlock()
 	stream, err := c.session.AcceptUniStream(ctx)
 	if err != nil {
 		return nil, err
@@ -310,23 +211,22 @@ func (c *Conn) SubscribeRequestBufferByCount(ctx context.Context, topic string, 
 		return nil, fmt.Errorf("failed to subscribe %v", topic)
 	}
 
-	subConn := newSubConn(topic, stream, c)
+	subStream := newSubscribeStream(topic, stream, c)
 	go func() {
-		if err := subConn.start(ctx); err != nil {
+		if err := subStream.start(ctx); err != nil {
 			c.logger.Println(err)
 		}
 	}()
 
-	return subConn, nil
+	return subStream, nil
 }
 
-// CancelSubscribe cancels subscription.
-func (c *Conn) CancelSubscribe(topic string) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+func (c *Conn) unsubscribe(topic string) error {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
 	binary.LittleEndian.PutUint16(c.buf, uint16(len(topic)+1))
 	n := 2
-	c.buf[n] = endStream
+	c.buf[n] = unsubscribe
 	n++
 	copy(c.buf, topic)
 	n += len(topic)

@@ -6,8 +6,8 @@ import (
 	"github.com/lucas-clemente/quic-go"
 )
 
-// SubStream is a subscription stream.
-type SubStream struct {
+// SubscribeStream is a subscription stream.
+type SubscribeStream struct {
 	receive chan []byte
 	topic   string
 	stream  quic.ReceiveStream
@@ -15,8 +15,8 @@ type SubStream struct {
 	ctx     context.Context
 }
 
-func newSubConn(topic string, stream quic.ReceiveStream, conn *Conn) *SubStream {
-	return &SubStream{
+func newSubscribeStream(topic string, stream quic.ReceiveStream, conn *Conn) *SubscribeStream {
+	return &SubscribeStream{
 		receive: make(chan []byte),
 		topic:   topic,
 		stream:  stream,
@@ -24,7 +24,7 @@ func newSubConn(topic string, stream quic.ReceiveStream, conn *Conn) *SubStream 
 	}
 }
 
-func (c *SubStream) start(ctx context.Context) error {
+func (c *SubscribeStream) start(ctx context.Context) error {
 	c.ctx = ctx
 	buf := make([]byte, c.conn.config.MaxMessageSize)
 	for {
@@ -47,21 +47,21 @@ func (c *SubStream) start(ctx context.Context) error {
 }
 
 // Topic is a subscribed topic.
-func (c *SubStream) Topic() string {
+func (c *SubscribeStream) Topic() string {
 	return c.topic
 }
 
 // Receive returns received message.
-func (c *SubStream) Receive() <-chan []byte {
+func (c *SubscribeStream) Receive() <-chan []byte {
 	return c.receive
 }
 
 // Done channel for cancellation.
-func (c *SubStream) Done() <-chan struct{} {
+func (c *SubscribeStream) Done() <-chan struct{} {
 	return c.ctx.Done()
 }
 
 // Close closes the stream.
-func (c *SubStream) Close() error {
-	return c.conn.CancelSubscribe(c.topic)
+func (c *SubscribeStream) Close() error {
+	return c.conn.unsubscribe(c.topic)
 }

@@ -111,9 +111,6 @@ func (c *client) startStream(ctx context.Context, buf []byte) error {
 
 		messageType := buf[0]
 		topic := string(buf[1:n])
-		if _, err := c.read(buf, c.stream); err != nil {
-			return err
-		}
 
 		switch messageType {
 		case startPublish:
@@ -166,7 +163,7 @@ func (c *client) startPublish(ctx context.Context, topic string) error {
 				return
 			default:
 			}
-
+			
 			n, err := c.read(buf, stream)
 			if err != nil {
 				c.broker.logger.Println(err)
@@ -193,15 +190,7 @@ func (c *client) cancelPublish(topic string) {
 }
 
 func (c *client) subscribe(ctx context.Context, topic string, buf []byte) error {
-	stream, err := c.session.OpenUniStreamSync(ctx)
-	if err != nil {
-		return err
-	}
-
-	binary.LittleEndian.PutUint16(buf, uint16(len(topic)+1))
-	buf[2] = sub
-	copy(buf[3:], topic)
-	if _, err := stream.Write(buf); err != nil {
+	if _, err := c.read(buf, c.stream); err != nil {
 		return err
 	}
 
@@ -212,6 +201,11 @@ func (c *client) subscribe(ctx context.Context, topic string, buf []byte) error 
 	n++
 	copy(buf[n:n+len(topic)], topic)
 	n += len(topic)
+	stream, err := c.session.OpenUniStreamSync(ctx)
+	if err != nil {
+		return err
+	}
+
 	if _, err := stream.Write(buf[:n]); err != nil {
 		return err
 	}
