@@ -91,6 +91,7 @@ func Dial(ctx context.Context, address string, tlsConf *tls.Config, config *Conf
 	return conn, err
 }
 
+// CreatePublishStream creates publish stream.
 func (c *Conn) CreatePublishStream(ctx context.Context, topic string) (*PublishStream, error) {
 	c.acceptStreamMutex.Lock()
 	defer c.acceptStreamMutex.Unlock()
