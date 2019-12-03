@@ -9,7 +9,6 @@ import (
 	"log"
 	"os"
 	"sync"
-	"time"
 
 	"github.com/lucas-clemente/quic-go"
 )
@@ -100,9 +99,10 @@ func (c *Conn) CreatePublishStream(ctx context.Context, topic string) (*PublishS
 	n := 2
 	c.buf[n] = startPublish
 	n++
-	copy(c.buf[n:], topic)
+	copy(c.buf[n:n+len(topic)], topic)
 	n += len(topic)
 	if _, err := c.stream.Write(c.buf[:n]); err != nil {
+		c.mutex.Unlock()
 		return nil, err
 	}
 
@@ -123,39 +123,6 @@ func (c *Conn) CreatePublishStream(ctx context.Context, topic string) (*PublishS
 	}
 
 	return newPublishStream(topic, stream, c), nil
-}
-
-// Publish publishes a message.
-func (c *Conn) Publish(topic string, data []byte, buffer bool, duration time.Duration) error {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-	binary.LittleEndian.PutUint16(c.buf, uint16(len(topic)+1))
-	n := 2
-	if buffer {
-		c.buf[n] = cancelPublish
-		n++
-		copy(c.buf[n:], topic)
-		n += len(topic)
-		binary.LittleEndian.PutUint16(c.buf[n:], uint16(len(data)+4))
-		n += 2
-		binary.LittleEndian.PutUint32(c.buf[n:], uint32(duration/time.Second))
-		n += 4
-	} else {
-		c.buf[n] = startPublish
-		n++
-		copy(c.buf[n:], topic)
-		n += len(topic)
-		binary.LittleEndian.PutUint16(c.buf[n:], uint16(len(data)))
-		n += 2
-	}
-
-	copy(c.buf[n:], data)
-	n += len(data)
-	if _, err := c.stream.Write(c.buf[:n]); err != nil {
-		return err
-	}
-
-	return nil
 }
 
 func (c *Conn) cancelPublish(topic string) error {
@@ -185,7 +152,7 @@ func (c *Conn) Subscribe(ctx context.Context, topic string, count int) (*Subscri
 	n := 2
 	c.buf[n] = subscribe
 	n++
-	copy(c.buf[n:], topic)
+	copy(c.buf[n:n+len(topic)], topic)
 	n += len(topic)
 	binary.LittleEndian.PutUint16(c.buf[n:], 2)
 	n += 2
