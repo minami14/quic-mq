@@ -79,6 +79,7 @@ func (b *messageBuffer) writeBuffer(stream quic.SendStream, buf []byte, count in
 
 	for index < b.nextIndex {
 		msg := b.messages[index].buf
+		index++
 		if n > 0 && len(msg)+2+n >= len(buf) {
 			if _, err := stream.Write(buf[:n]); err != nil {
 				return err
@@ -90,6 +91,7 @@ func (b *messageBuffer) writeBuffer(stream quic.SendStream, buf []byte, count in
 		binary.LittleEndian.PutUint16(buf[n:], uint16(len(msg)))
 		n += 2
 		copy(buf[n:len(msg)+n], msg)
+		n += len(msg)
 	}
 
 	if n > 0 {
@@ -104,8 +106,7 @@ func (b *messageBuffer) writeBuffer(stream quic.SendStream, buf []byte, count in
 func (b *messageBuffer) deleteExpiredMessages(now time.Time, lifetime time.Duration) {
 	b.Lock()
 	defer b.Unlock()
-	max := b.maxBuffersCount
-	for ; b.headIndex < max; b.headIndex++ {
+	for max := b.maxBuffersCount; b.headIndex < max; b.headIndex++ {
 		msg := b.messages[b.headIndex]
 		if msg == nil {
 			return
@@ -128,7 +129,6 @@ func (b *messageBuffer) deleteExpiredMessages(now time.Time, lifetime time.Durat
 type messageBufferManager struct {
 	*sync.RWMutex
 	broker          *MessageBroker
-	lockers         map[string]*sync.RWMutex
 	buffers         map[string]*messageBuffer
 	lifetime        time.Duration
 	maxBuffersCount int
@@ -139,7 +139,6 @@ func newBufferedMessageManager(broker *MessageBroker, config *Config) *messageBu
 	return &messageBufferManager{
 		RWMutex:         new(sync.RWMutex),
 		broker:          broker,
-		lockers:         map[string]*sync.RWMutex{},
 		buffers:         map[string]*messageBuffer{},
 		lifetime:        config.BufferLifetime,
 		maxBuffersCount: config.MaxBuffersCountPerTopic,
@@ -152,6 +151,7 @@ func (m *messageBufferManager) store(topic string, buf []byte) {
 	buffers, ok := m.buffers[topic]
 	if !ok {
 		if len(m.buffers) >= m.maxTopicCount {
+			m.Unlock()
 			return
 		}
 
