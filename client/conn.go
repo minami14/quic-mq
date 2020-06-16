@@ -70,7 +70,6 @@ func Dial(ctx context.Context, address string, tlsConf *tls.Config, config *Conf
 	n += len(config.Password)
 	if _, err := stream.Write(buf[:n]); err != nil {
 		_ = stream.Close()
-		_ = session.Close()
 		return nil, err
 	}
 
