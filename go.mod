@@ -2,4 +2,4 @@ module github.com/minami14/quic-mq
 
 go 1.13
 
-require github.com/lucas-clemente/quic-go v0.20.1
+require github.com/lucas-clemente/quic-go v0.21.2
